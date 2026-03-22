@@ -25,6 +25,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 VPN_KEY = os.getenv("VPN_KEY")
 PAYMENT_CARD = os.getenv("PAYMENT_CARD", "")
+PAYMENT_PHONE = os.getenv("PAYMENT_PHONE", "")
+PAYMENT_BANK = os.getenv("PAYMENT_BANK", "Т-Банк")
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/supp_vpntock1a")
 INSTRUCTION_URL = os.getenv("INSTRUCTION_URL", "https://t.me/blackvpn_connect")
 KEY_LIFETIME_SECONDS = int(os.getenv("KEY_LIFETIME_SECONDS", "45"))
@@ -41,6 +43,8 @@ if not VPN_KEY:
     raise ValueError("VPN_KEY не найден в .env")
 if not PAYMENT_CARD:
     raise ValueError("PAYMENT_CARD не найден в .env")
+if not PAYMENT_PHONE:
+    raise ValueError("PAYMENT_PHONE не найден в .env")
 
 # ================= INIT =================
 
@@ -67,9 +71,13 @@ BUY_TEXT = (
     "💎 <b>Премиум-доступ</b>\n\n"
     f"Стоимость: <b>{SUBSCRIPTION_PRICE} ₽</b>\n"
     f"Срок доступа: <b>{SUBSCRIPTION_PERIOD}</b>\n\n"
-    "Для оплаты переведите по номеру карты:\n"
+    "Выберите удобный способ оплаты:\n\n"
+    "💳 <b>По номеру карты:</b>\n"
     "<code>{payment_card}</code>\n\n"
-    "Нажмите кнопку ниже, чтобы скопировать номер карты.\n"
+    "📱 <b>По СБП:</b>\n"
+    "<code>{payment_phone}</code>\n"
+    "Банк: <b>{payment_bank}</b>\n\n"
+    "Нажмите кнопку ниже, чтобы скопировать нужные реквизиты.\n"
     "После перевода нажмите <b>«Я оплатил»</b> и отправьте чек."
 )
 
@@ -287,6 +295,12 @@ def pay_menu():
                 copy_text=CopyTextButton(text=PAYMENT_CARD)
             )
         ],
+        [
+            InlineKeyboardButton(
+                text="📱 Скопировать номер для СБП",
+                copy_text=CopyTextButton(text=PAYMENT_PHONE)
+            )
+        ],
         [InlineKeyboardButton(text="💸 Я оплатил", callback_data="paid")],
         [InlineKeyboardButton(text="🏠 В меню", callback_data="home")],
     ])
@@ -355,10 +369,16 @@ async def start(message: Message):
 
 @dp.callback_query(F.data == "buy")
 async def buy(callback: CallbackQuery):
-    formatted_card = " ".join([PAYMENT_CARD[i:i + 4] for i in range(0, len(PAYMENT_CARD), 4)])
+    formatted_card = " ".join(
+        [PAYMENT_CARD[i:i + 4] for i in range(0, len(PAYMENT_CARD), 4)]
+    )
 
     await callback.message.edit_text(
-        BUY_TEXT.format(payment_card=formatted_card),
+        BUY_TEXT.format(
+            payment_card=formatted_card,
+            payment_phone=PAYMENT_PHONE,
+            payment_bank=PAYMENT_BANK
+        ),
         reply_markup=pay_menu()
     )
     await callback.answer()

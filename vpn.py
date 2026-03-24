@@ -98,6 +98,11 @@ CHECK_ACCEPTED_TEXT = (
     "Проверка оплаты уже запущена. Ожидайте подтверждения."
 )
 
+PAYMENT_REJECTED_TEXT = (
+    "❌ <b>Оплата отклонена</b>\n"
+    "Если это ошибка, свяжитесь с поддержкой и отправьте чек повторно."
+)
+
 HOME_TEXT = (
     "🏠 <b>Главное меню</b>\n\n"
     "Управление доступом доступно ниже 👇"
@@ -323,6 +328,62 @@ async def get_stats_text() -> str:
         f"⏳ Ожидают проверку оплаты: <b>{waiting_payments}</b>"
     )
 
+
+async def get_waiting_list_text() -> str:
+    async with aiosqlite.connect("vpn.db") as db:
+        async with db.execute("""
+            SELECT user_id, created_at
+            FROM payment_waiting
+            ORDER BY created_at DESC
+        """) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        return "⏳ <b>Ожидающих проверку нет</b>"
+
+    lines = ["⏳ <b>Ожидают проверку оплаты</b>\n"]
+    for user_id, created_at in rows:
+        lines.append(
+            f"🆔 <code>{user_id}</code>\n"
+            f"🕒 {created_at}\n"
+        )
+
+    return "\n".join(lines)
+
+
+async def get_paid_users_text() -> str:
+    async with aiosqlite.connect("vpn.db") as db:
+        async with db.execute("""
+            SELECT user_id, subscription_until
+            FROM users
+            WHERE subscription_until IS NOT NULL
+            ORDER BY subscription_until DESC
+        """) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        return "✅ <b>Оплативших пользователей пока нет</b>"
+
+    lines = ["✅ <b>Пользователи с подпиской</b>\n"]
+    current_time = now()
+
+    for user_id, subscription_until in rows:
+        try:
+            expire = datetime.fromisoformat(subscription_until)
+            status = "активна" if expire > current_time else "истекла"
+            expire_str = expire.strftime("%d.%m.%Y %H:%M")
+        except ValueError:
+            status = "ошибка даты"
+            expire_str = subscription_until
+
+        lines.append(
+            f"🆔 <code>{user_id}</code>\n"
+            f"📅 До: <b>{expire_str}</b>\n"
+            f"📌 Статус: <b>{status}</b>\n"
+        )
+
+    return "\n".join(lines)
+
 # ================= KEYBOARDS =================
 
 def main_menu(user_id: int | None = None):
@@ -337,6 +398,8 @@ def main_menu(user_id: int | None = None):
 
     if user_id == ADMIN_ID:
         keyboard.insert(0, [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")])
+        keyboard.insert(1, [InlineKeyboardButton(text="⏳ Ожидают проверку", callback_data="waiting_list")])
+        keyboard.insert(2, [InlineKeyboardButton(text="✅ Уже оплатили", callback_data="paid_list")])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -362,10 +425,16 @@ def pay_menu():
 
 def confirm_kb(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="✅ Подтвердить оплату",
-            callback_data=f"confirm_{user_id}"
-        )]
+        [
+            InlineKeyboardButton(
+                text="✅ Подтвердить оплату",
+                callback_data=f"confirm_{user_id}"
+            ),
+            InlineKeyboardButton(
+                text="❌ Отказать оплату",
+                callback_data=f"reject_{user_id}"
+            ),
+        ]
     ])
 
 # ================= HELPERS =================
@@ -442,6 +511,7 @@ async def buy(callback: CallbackQuery):
 @dp.callback_query(F.data == "paid")
 async def paid(callback: CallbackQuery):
     user_id = callback.from_user.id
+    await ensure_user_exists(user_id)
     await set_waiting(user_id)
 
     old_temp_msg_id = await get_temp_message(user_id)
@@ -503,7 +573,7 @@ async def receipt(message: Message):
             "Проверьте <code>ADMIN_ID</code> и убедитесь, что администратор написал боту <code>/start</code>."
         )
 
-# ================= CONFIRM =================
+# ================= CONFIRM / REJECT =================
 
 @dp.callback_query(F.data.startswith("confirm_"))
 async def confirm(callback: CallbackQuery):
@@ -533,6 +603,38 @@ async def confirm(callback: CallbackQuery):
         await callback.message.edit_reply_markup(reply_markup=None)
 
     await callback.answer("Готово")
+
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[1])
+
+    await clear_waiting(user_id)
+
+    try:
+        await bot.send_message(user_id, PAYMENT_REJECTED_TEXT, reply_markup=main_menu(user_id))
+    except Exception:
+        pass
+
+    try:
+        old_caption = callback.message.caption or ""
+        if "❌ <b>Оплата отклонена</b>" not in old_caption:
+            new_caption = old_caption + "\n\n❌ <b>Оплата отклонена</b>"
+        else:
+            new_caption = old_caption
+
+        await callback.message.edit_caption(
+            caption=new_caption,
+            reply_markup=None
+        )
+    except TelegramBadRequest:
+        await callback.message.edit_reply_markup(reply_markup=None)
+
+    await callback.answer("Оплата отклонена")
 
 # ================= KEY =================
 
@@ -598,6 +700,34 @@ async def stats(callback: CallbackQuery):
         return
 
     text = await get_stats_text()
+    await callback.message.edit_text(
+        text,
+        reply_markup=main_menu(callback.from_user.id)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "waiting_list")
+async def waiting_list(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    text = await get_waiting_list_text()
+    await callback.message.edit_text(
+        text,
+        reply_markup=main_menu(callback.from_user.id)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "paid_list")
+async def paid_list(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    text = await get_paid_users_text()
     await callback.message.edit_text(
         text,
         reply_markup=main_menu(callback.from_user.id)

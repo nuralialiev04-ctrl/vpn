@@ -243,6 +243,12 @@ async def clear_waiting(user_id: int):
         )
         await db.commit()
 
+
+async def clear_all_waiting():
+    async with aiosqlite.connect("vpn.db") as db:
+        await db.execute("DELETE FROM payment_waiting")
+        await db.commit()
+
 # ================= TEMP MESSAGE =================
 
 async def save_temp_message(user_id: int, message_id: int):
@@ -301,6 +307,12 @@ async def get_receipt(user_id: int):
 async def clear_receipt(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
         await db.execute("DELETE FROM receipts WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+
+async def clear_all_receipts():
+    async with aiosqlite.connect("vpn.db") as db:
+        await db.execute("DELETE FROM receipts")
         await db.commit()
 
 # ================= KEY COOLDOWN =================
@@ -378,38 +390,16 @@ async def get_waiting_users():
             return await cursor.fetchall()
 
 
-async def get_paid_users_text() -> str:
+async def get_paid_users():
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute("""
-            SELECT user_id, subscription_until
-            FROM users
-            WHERE subscription_until IS NOT NULL
-            ORDER BY subscription_until DESC
+            SELECT u.user_id, r.username, u.subscription_until
+            FROM users u
+            LEFT JOIN receipts r ON u.user_id = r.user_id
+            WHERE u.subscription_until IS NOT NULL
+            ORDER BY u.subscription_until DESC
         """) as cursor:
-            rows = await cursor.fetchall()
-
-    if not rows:
-        return "✅ <b>Оплативших пользователей пока нет</b>"
-
-    lines = ["✅ <b>Пользователи с подпиской</b>\n"]
-    current_time = now()
-
-    for user_id, subscription_until in rows:
-        try:
-            expire = datetime.fromisoformat(subscription_until)
-            status = "активна" if expire > current_time else "истекла"
-            expire_str = expire.strftime("%d.%m.%Y %H:%M")
-        except ValueError:
-            status = "ошибка даты"
-            expire_str = subscription_until
-
-        lines.append(
-            f"🆔 <code>{user_id}</code>\n"
-            f"📅 До: <b>{expire_str}</b>\n"
-            f"📌 Статус: <b>{status}</b>\n"
-        )
-
-    return "\n".join(lines)
+            return await cursor.fetchall()
 
 # ================= KEYBOARDS =================
 
@@ -424,7 +414,7 @@ def main_menu(user_id: int | None = None):
     ]
 
     if user_id == ADMIN_ID:
-        keyboard.insert(0, [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin_panel")])
+        keyboard.insert(0, [InlineKeyboardButton(text="🛠 Админ панель", callback_data="admin_panel")])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -434,7 +424,18 @@ def admin_panel_kb():
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="⏳ Ожидают проверку", callback_data="waiting_list")],
         [InlineKeyboardButton(text="✅ Уже оплатили", callback_data="paid_list")],
+        [InlineKeyboardButton(text="🗑 Очистить ожидающих", callback_data="clear_waiting_all")],
         [InlineKeyboardButton(text="🏠 В меню", callback_data="home")],
+    ])
+
+
+def confirm_clear_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да", callback_data="confirm_clear_yes"),
+            InlineKeyboardButton(text="❌ Нет", callback_data="confirm_clear_no"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
     ])
 
 
@@ -479,8 +480,24 @@ def waiting_list_kb(rows):
         short_time = created_at[:16].replace("T", " ")
         keyboard.append([
             InlineKeyboardButton(
-                text=f"🧾 {user_id} | {short_time}",
+                text=f"🧾 ID {user_id} • {short_time}",
                 callback_data=f"open_waiting_{user_id}"
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def paid_list_kb(rows):
+    keyboard = []
+
+    for user_id, username, _subscription_until in rows:
+        name = username if username else "без username"
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"✅ {name} | {user_id}",
+                callback_data=f"open_paid_{user_id}"
             )
         ])
 
@@ -651,7 +668,6 @@ async def confirm(callback: CallbackQuery):
 
     await set_subscription(user_id, days=365)
     await clear_waiting(user_id)
-    await clear_receipt(user_id)
 
     asyncio.create_task(send_temporary_key(user_id, user_id))
 
@@ -814,7 +830,7 @@ async def open_waiting(callback: CallbackQuery):
     photo_file_id, username, created_at = receipt
 
     await bot.send_photo(
-        callback.from_user.id,
+        chat_id=callback.from_user.id,
         photo=photo_file_id,
         caption=(
             "💸 <b>Чек на проверку</b>\n\n"
@@ -834,12 +850,114 @@ async def paid_list(callback: CallbackQuery):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    text = await get_paid_users_text()
+    rows = await get_paid_users()
+
+    if not rows:
+        await callback.message.edit_text(
+            "✅ <b>Оплативших пока нет</b>",
+            reply_markup=admin_panel_kb()
+        )
+        await callback.answer()
+        return
+
     await callback.message.edit_text(
-        text,
-        reply_markup=admin_panel_kb()
+        "✅ <b>Уже оплатили</b>\n\nНажмите на пользователя, чтобы открыть данные:",
+        reply_markup=paid_list_kb(rows)
     )
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("open_paid_"))
+async def open_paid(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[2])
+
+    async with aiosqlite.connect("vpn.db") as db:
+        row = await db.execute_fetchone("""
+            SELECT u.subscription_until, r.photo_file_id, r.username, r.created_at
+            FROM users u
+            LEFT JOIN receipts r ON u.user_id = r.user_id
+            WHERE u.user_id = ?
+        """, (user_id,))
+
+    if not row:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+
+    subscription_until, photo_file_id, username, created_at = row
+    username = username or "без username"
+    sub_text = subscription_until[:16].replace("T", " ") if subscription_until else "нет"
+
+    caption = (
+        "✅ <b>Оплативший пользователь</b>\n\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"👤 Username: {username}\n"
+        f"📅 Подписка до: <b>{sub_text}</b>\n"
+    )
+
+    if created_at:
+        caption += f"🕒 Чек отправлен: <b>{created_at[:16].replace('T', ' ')}</b>\n"
+
+    if photo_file_id:
+        await bot.send_photo(
+            callback.from_user.id,
+            photo_file_id,
+            caption=caption
+        )
+    else:
+        await bot.send_message(
+            callback.from_user.id,
+            caption + "\n❌ Фото чека не найдено"
+        )
+
+    await callback.answer("Данные открыты")
+
+# ================= CLEAR WITH CONFIRM =================
+
+@dp.callback_query(F.data == "clear_waiting_all")
+async def clear_waiting_confirm(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "⚠️ <b>Ты точно хочешь удалить ВСЕ ожидающие заявки?</b>\n\n"
+        "Это действие нельзя отменить.",
+        reply_markup=confirm_clear_kb()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "confirm_clear_yes")
+async def clear_waiting_yes(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await clear_all_waiting()
+    await clear_all_receipts()
+
+    await callback.message.edit_text(
+        "🗑 <b>Все ожидающие заявки удалены</b>",
+        reply_markup=admin_panel_kb()
+    )
+    await callback.answer("Очищено")
+
+
+@dp.callback_query(F.data == "confirm_clear_no")
+async def clear_waiting_no(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "❌ <b>Очистка отменена</b>",
+        reply_markup=admin_panel_kb()
+    )
+    await callback.answer("Отменено")
 
 # ================= HOME =================
 

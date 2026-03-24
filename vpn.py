@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import math
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -10,12 +12,20 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.types import (
     CallbackQuery,
+    CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    CopyTextButton,
 )
 from dotenv import load_dotenv
+
+# ================= LOGGING =================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("vpn_bot")
 
 # ================= LOAD ENV =================
 
@@ -120,8 +130,67 @@ EXPIRED_SUB_TEXT = (
 
 # ================= DATABASE =================
 
+async def migrate_receipts_table(db: aiosqlite.Connection):
+    async with db.execute("PRAGMA table_info(receipts)") as cursor:
+        columns = await cursor.fetchall()
+
+    if not columns:
+        return
+
+    column_names = [col[1] for col in columns]
+    has_old_schema = "id" not in column_names
+    has_caption_column = "caption" in column_names
+
+    if not has_old_schema and has_caption_column:
+        return
+
+    logger.info("Запущена миграция таблицы receipts")
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS receipts_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            photo_file_id TEXT NOT NULL,
+            username TEXT,
+            caption TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    if has_old_schema:
+        if "caption" in column_names:
+            await db.execute("""
+                INSERT INTO receipts_new (user_id, photo_file_id, username, caption, created_at)
+                SELECT user_id, photo_file_id, username, caption, created_at
+                FROM receipts
+            """)
+        else:
+            await db.execute("""
+                INSERT INTO receipts_new (user_id, photo_file_id, username, caption, created_at)
+                SELECT user_id, photo_file_id, username, NULL, created_at
+                FROM receipts
+            """)
+
+        await db.execute("DROP TABLE receipts")
+        await db.execute("ALTER TABLE receipts_new RENAME TO receipts")
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_receipts_user_id_created_at
+            ON receipts(user_id, created_at DESC)
+        """)
+        await db.commit()
+        logger.info("Миграция таблицы receipts завершена")
+        return
+
+    if not has_caption_column:
+        await db.execute("ALTER TABLE receipts ADD COLUMN caption TEXT")
+        await db.commit()
+        logger.info("Добавлена колонка caption в receipts")
+
+
 async def init_db():
     async with aiosqlite.connect("vpn.db") as db:
+        await db.execute("PRAGMA journal_mode=WAL;")
+
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -152,13 +221,21 @@ async def init_db():
 
         await db.execute("""
         CREATE TABLE IF NOT EXISTS receipts (
-            user_id INTEGER PRIMARY KEY,
-            photo_file_id TEXT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            photo_file_id TEXT NOT NULL,
             username TEXT,
-            created_at TEXT
+            caption TEXT,
+            created_at TEXT NOT NULL
         )
         """)
 
+        await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_receipts_user_id_created_at
+        ON receipts(user_id, created_at DESC)
+        """)
+
+        await migrate_receipts_table(db)
         await db.commit()
 
 
@@ -192,7 +269,7 @@ async def set_subscription(user_id: int, days: int = 365):
                 if current_until > base_date:
                     base_date = current_until
             except ValueError:
-                pass
+                logger.warning("Некорректная дата подписки у user_id=%s: %s", user_id, row[0])
 
         new_expire = base_date + timedelta(days=days)
 
@@ -202,6 +279,8 @@ async def set_subscription(user_id: int, days: int = 365):
         ON CONFLICT(user_id) DO UPDATE SET subscription_until = excluded.subscription_until
         """, (user_id, new_expire.isoformat()))
         await db.commit()
+
+    logger.info("Подписка обновлена: user_id=%s до %s", user_id, new_expire.isoformat())
 
 
 async def get_subscription(user_id: int):
@@ -224,6 +303,8 @@ async def set_waiting(user_id: int):
         """, (user_id, now().isoformat()))
         await db.commit()
 
+    logger.info("Пользователь переведен в ожидание оплаты: user_id=%s", user_id)
+
 
 async def is_waiting(user_id: int) -> bool:
     async with aiosqlite.connect("vpn.db") as db:
@@ -243,11 +324,26 @@ async def clear_waiting(user_id: int):
         )
         await db.commit()
 
+    logger.info("Ожидание оплаты очищено: user_id=%s", user_id)
+
+
+async def clear_receipts_for_waiting_users():
+    async with aiosqlite.connect("vpn.db") as db:
+        await db.execute("""
+            DELETE FROM receipts
+            WHERE user_id IN (SELECT user_id FROM payment_waiting)
+        """)
+        await db.commit()
+
+    logger.info("Удалены чеки только ожидающих пользователей")
+
 
 async def clear_all_waiting():
     async with aiosqlite.connect("vpn.db") as db:
         await db.execute("DELETE FROM payment_waiting")
         await db.commit()
+
+    logger.info("Список ожидающих очищен")
 
 # ================= TEMP MESSAGE =================
 
@@ -281,25 +377,25 @@ async def clear_temp_message(user_id: int):
 
 # ================= RECEIPTS =================
 
-async def save_receipt(user_id: int, photo_file_id: str, username: str):
+async def save_receipt(user_id: int, photo_file_id: str, username: str, caption: str | None = None):
     async with aiosqlite.connect("vpn.db") as db:
         await db.execute("""
-        INSERT INTO receipts (user_id, photo_file_id, username, created_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            photo_file_id = excluded.photo_file_id,
-            username = excluded.username,
-            created_at = excluded.created_at
-        """, (user_id, photo_file_id, username, now().isoformat()))
+        INSERT INTO receipts (user_id, photo_file_id, username, caption, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """, (user_id, photo_file_id, username, caption, now().isoformat()))
         await db.commit()
+
+    logger.info("Сохранен чек: user_id=%s, username=%s", user_id, username)
 
 
 async def get_receipt(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute("""
-            SELECT photo_file_id, username, created_at
+            SELECT id, photo_file_id, username, caption, created_at
             FROM receipts
             WHERE user_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
         """, (user_id,)) as cursor:
             return await cursor.fetchone()
 
@@ -309,11 +405,7 @@ async def clear_receipt(user_id: int):
         await db.execute("DELETE FROM receipts WHERE user_id = ?", (user_id,))
         await db.commit()
 
-
-async def clear_all_receipts():
-    async with aiosqlite.connect("vpn.db") as db:
-        await db.execute("DELETE FROM receipts")
-        await db.commit()
+    logger.info("Удалены все чеки пользователя: user_id=%s", user_id)
 
 # ================= KEY COOLDOWN =================
 
@@ -331,6 +423,7 @@ async def get_remaining_cooldown(user_id: int) -> int:
     try:
         last_sent_at = datetime.fromisoformat(row[0])
     except ValueError:
+        logger.warning("Некорректная дата key_access у user_id=%s: %s", user_id, row[0])
         return 0
 
     seconds_passed = int((now() - last_sent_at).total_seconds())
@@ -393,9 +486,17 @@ async def get_waiting_users():
 async def get_paid_users():
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute("""
-            SELECT u.user_id, r.username, u.subscription_until
+            SELECT
+                u.user_id,
+                (
+                    SELECT r.username
+                    FROM receipts r
+                    WHERE r.user_id = u.user_id
+                    ORDER BY r.created_at DESC, r.id DESC
+                    LIMIT 1
+                ) AS username,
+                u.subscription_until
             FROM users u
-            LEFT JOIN receipts r ON u.user_id = r.user_id
             WHERE u.subscription_until IS NOT NULL
             ORDER BY u.subscription_until DESC
         """) as cursor:
@@ -507,37 +608,49 @@ def paid_list_kb(rows):
 # ================= HELPERS =================
 
 async def send_temporary_key(chat_id: int, user_id: int):
-    await update_key_sent_time(user_id)
-
-    msg = await bot.send_message(
-        chat_id,
-        "✅ <b>Доступ активирован</b>\n\n"
-        "🔑 <b>Ваш VPN-ключ:</b>\n"
-        f"<code>{VPN_KEY}</code>\n\n"
-        f"👤 Доступ выдан для ID: <code>{user_id}</code>\n"
-        f"🕒 Сообщение будет удалено через <b>{KEY_LIFETIME_SECONDS}</b> сек.\n\n"
-        "⚠️ Не передавайте ключ третьим лицам."
-    )
-
-    await asyncio.sleep(KEY_LIFETIME_SECONDS)
-
     try:
-        await bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
-    except Exception:
-        pass
+        msg = await bot.send_message(
+            chat_id,
+            "✅ <b>Доступ активирован</b>\n\n"
+            "🔑 <b>Ваш VPN-ключ:</b>\n"
+            f"<code>{VPN_KEY}</code>\n\n"
+            f"👤 Доступ выдан для ID: <code>{user_id}</code>\n"
+            f"🕒 Сообщение будет удалено через <b>{KEY_LIFETIME_SECONDS}</b> сек.\n\n"
+            "⚠️ Не передавайте ключ третьим лицам."
+        )
+        logger.info("Временный ключ отправлен: user_id=%s chat_id=%s", user_id, chat_id)
+
+        await asyncio.sleep(KEY_LIFETIME_SECONDS)
+
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+            logger.info("Сообщение с ключом удалено: user_id=%s message_id=%s", user_id, msg.message_id)
+        except Exception as e:
+            logger.warning(
+                "Не удалось удалить сообщение с ключом: user_id=%s message_id=%s error=%s",
+                user_id,
+                msg.message_id,
+                e,
+            )
+    except Exception as e:
+        logger.exception("Ошибка при временной выдаче ключа: user_id=%s error=%s", user_id, e)
 
 
 async def safe_delete_message(chat_id: int, message_id: int):
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            "Не удалось удалить сообщение: chat_id=%s message_id=%s error=%s",
+            chat_id,
+            message_id,
+            e,
+        )
 
 
 def format_subscription_text(expire: datetime) -> str:
-    days_left = (expire - now()).days
-    if days_left < 0:
-        days_left = 0
+    seconds_left = max(0, (expire - now()).total_seconds())
+    days_left = math.ceil(seconds_left / 86400) if seconds_left > 0 else 0
 
     return (
         "📅 <b>Моя подписка</b>\n\n"
@@ -551,6 +664,7 @@ def format_subscription_text(expire: datetime) -> str:
 @dp.message(CommandStart())
 async def start(message: Message):
     await ensure_user_exists(message.from_user.id)
+    logger.info("Команда /start от user_id=%s", message.from_user.id)
     await message.answer(
         start_text(message.from_user.first_name),
         reply_markup=main_menu(message.from_user.id)
@@ -560,8 +674,9 @@ async def start(message: Message):
 
 @dp.callback_query(F.data == "buy")
 async def buy(callback: CallbackQuery):
+    raw_card = PAYMENT_CARD.replace(" ", "")
     formatted_card = " ".join(
-        [PAYMENT_CARD[i:i + 4] for i in range(0, len(PAYMENT_CARD), 4)]
+        raw_card[i:i + 4] for i in range(0, len(raw_card), 4)
     )
 
     await callback.message.edit_text(
@@ -589,6 +704,7 @@ async def paid(callback: CallbackQuery):
     msg = await callback.message.answer(WAITING_CHECK_TEXT)
     await save_temp_message(user_id, msg.message_id)
 
+    logger.info("Пользователь нажал 'Я оплатил': user_id=%s", user_id)
     await callback.answer()
 
 # ================= RECEIPT =================
@@ -611,32 +727,39 @@ async def receipt(message: Message):
 
     try:
         await message.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Не удалось удалить сообщение пользователя с чеком: user_id=%s error=%s", user_id, e)
 
     username = (
         f"@{message.from_user.username}"
         if message.from_user.username
         else "без username"
     )
+    user_caption = message.caption.strip() if message.caption else None
 
-    await save_receipt(user_id, message.photo[-1].file_id, username)
+    await save_receipt(user_id, message.photo[-1].file_id, username, user_caption)
+
+    admin_caption = (
+        "💸 <b>Новый чек на подтверждение</b>\n\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"👤 Username: {username}"
+    )
+    if user_caption:
+        admin_caption += f"\n📝 Комментарий:\n<blockquote>{user_caption}</blockquote>"
 
     try:
         await bot.send_photo(
             ADMIN_ID,
             photo=message.photo[-1].file_id,
-            caption=(
-                "💸 <b>Новый чек на подтверждение</b>\n\n"
-                f"🆔 ID: <code>{user_id}</code>\n"
-                f"👤 Username: {username}"
-            ),
+            caption=admin_caption,
             reply_markup=confirm_kb(user_id)
         )
 
         await message.answer(CHECK_ACCEPTED_TEXT)
+        logger.info("Чек отправлен админу: user_id=%s username=%s", user_id, username)
 
     except TelegramBadRequest:
+        logger.exception("Не удалось передать чек админу: user_id=%s", user_id)
         await message.answer(
             "❌ <b>Не удалось передать чек администратору</b>\n"
             "Проверьте <code>ADMIN_ID</code> и убедитесь, что администратор написал боту <code>/start</code>."
@@ -666,8 +789,14 @@ async def confirm(callback: CallbackQuery):
 
     user_id = int(callback.data.split("_")[1])
 
+    if not await is_waiting(user_id):
+        await callback.answer("Заявка уже не в ожидании", show_alert=True)
+        return
+
     await set_subscription(user_id, days=365)
     await clear_waiting(user_id)
+
+    logger.info("Оплата подтверждена: admin_id=%s user_id=%s", callback.from_user.id, user_id)
 
     asyncio.create_task(send_temporary_key(user_id, user_id))
 
@@ -696,13 +825,19 @@ async def reject(callback: CallbackQuery):
 
     user_id = int(callback.data.split("_")[1])
 
+    if not await is_waiting(user_id):
+        await callback.answer("Заявка уже не в ожидании", show_alert=True)
+        return
+
     await clear_waiting(user_id)
     await clear_receipt(user_id)
 
+    logger.info("Оплата отклонена: admin_id=%s user_id=%s", callback.from_user.id, user_id)
+
     try:
         await bot.send_message(user_id, PAYMENT_REJECTED_TEXT, reply_markup=main_menu(user_id))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Не удалось отправить уведомление об отказе: user_id=%s error=%s", user_id, e)
 
     try:
         old_caption = callback.message.caption or ""
@@ -735,6 +870,7 @@ async def key(callback: CallbackQuery):
     try:
         expire = datetime.fromisoformat(sub_value)
     except ValueError:
+        logger.warning("Ошибка чтения даты подписки: user_id=%s value=%s", user_id, sub_value)
         await callback.answer("Ошибка данных", show_alert=True)
         return
 
@@ -750,6 +886,9 @@ async def key(callback: CallbackQuery):
             show_alert=True
         )
         return
+
+    await update_key_sent_time(user_id)
+    logger.info("Пользователь запросил ключ: user_id=%s", user_id)
 
     await callback.answer("Ключ отправлен")
     asyncio.create_task(send_temporary_key(user_id, user_id))
@@ -770,6 +909,7 @@ async def sub(callback: CallbackQuery):
             else:
                 text = EXPIRED_SUB_TEXT
         except ValueError:
+            logger.warning("Ошибка чтения подписки в sub: user_id=%s value=%s", callback.from_user.id, sub_value)
             text = "❌ <b>Не удалось прочитать данные подписки</b>"
 
     await callback.message.edit_text(text, reply_markup=main_menu(callback.from_user.id))
@@ -827,17 +967,22 @@ async def open_waiting(callback: CallbackQuery):
         await callback.answer("Чек не найден", show_alert=True)
         return
 
-    photo_file_id, username, created_at = receipt
+    _receipt_id, photo_file_id, username, user_caption, created_at = receipt
+
+    caption = (
+        "💸 <b>Чек на проверку</b>\n\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"👤 Username: {username}\n"
+        f"🕒 Создано: <b>{created_at[:16].replace('T', ' ')}</b>"
+    )
+
+    if user_caption:
+        caption += f"\n📝 Комментарий:\n<blockquote>{user_caption}</blockquote>"
 
     await bot.send_photo(
         chat_id=callback.from_user.id,
         photo=photo_file_id,
-        caption=(
-            "💸 <b>Чек на проверку</b>\n\n"
-            f"🆔 ID: <code>{user_id}</code>\n"
-            f"👤 Username: {username}\n"
-            f"🕒 Создано: <b>{created_at[:16].replace('T', ' ')}</b>"
-        ),
+        caption=caption,
         reply_markup=confirm_kb(user_id)
     )
 
@@ -877,9 +1022,37 @@ async def open_paid(callback: CallbackQuery):
 
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute("""
-            SELECT u.subscription_until, r.photo_file_id, r.username, r.created_at
+            SELECT
+                u.subscription_until,
+                (
+                    SELECT r.photo_file_id
+                    FROM receipts r
+                    WHERE r.user_id = u.user_id
+                    ORDER BY r.created_at DESC, r.id DESC
+                    LIMIT 1
+                ) AS photo_file_id,
+                (
+                    SELECT r.username
+                    FROM receipts r
+                    WHERE r.user_id = u.user_id
+                    ORDER BY r.created_at DESC, r.id DESC
+                    LIMIT 1
+                ) AS username,
+                (
+                    SELECT r.caption
+                    FROM receipts r
+                    WHERE r.user_id = u.user_id
+                    ORDER BY r.created_at DESC, r.id DESC
+                    LIMIT 1
+                ) AS receipt_caption,
+                (
+                    SELECT r.created_at
+                    FROM receipts r
+                    WHERE r.user_id = u.user_id
+                    ORDER BY r.created_at DESC, r.id DESC
+                    LIMIT 1
+                ) AS receipt_created_at
             FROM users u
-            LEFT JOIN receipts r ON u.user_id = r.user_id
             WHERE u.user_id = ?
         """, (user_id,)) as cursor:
             row = await cursor.fetchone()
@@ -888,7 +1061,7 @@ async def open_paid(callback: CallbackQuery):
         await callback.answer("Пользователь не найден", show_alert=True)
         return
 
-    subscription_until, photo_file_id, username, created_at = row
+    subscription_until, photo_file_id, username, receipt_caption, created_at = row
     username = username or "без username"
     sub_text = subscription_until[:16].replace("T", " ") if subscription_until else "нет"
 
@@ -901,6 +1074,9 @@ async def open_paid(callback: CallbackQuery):
 
     if created_at:
         caption += f"🕒 Чек отправлен: <b>{created_at[:16].replace('T', ' ')}</b>\n"
+
+    if receipt_caption:
+        caption += f"📝 Комментарий:\n<blockquote>{receipt_caption}</blockquote>\n"
 
     if photo_file_id:
         await bot.send_photo(
@@ -939,15 +1115,17 @@ async def clear_waiting_yes(callback: CallbackQuery):
         return
 
     try:
+        await clear_receipts_for_waiting_users()
         await clear_all_waiting()
-        await clear_all_receipts()
 
         await callback.message.edit_text(
             "🗑 <b>Все ожидающие заявки удалены</b>",
             reply_markup=admin_panel_kb()
         )
         await callback.answer("Очищено")
+        logger.info("Админ очистил все ожидающие заявки: admin_id=%s", callback.from_user.id)
     except Exception as e:
+        logger.exception("Ошибка при очистке ожидающих")
         await callback.answer("Ошибка очистки", show_alert=True)
         await bot.send_message(
             ADMIN_ID,
@@ -981,7 +1159,7 @@ async def home(callback: CallbackQuery):
 
 async def main():
     await init_db()
-    print("✅ Bot started")
+    logger.info("Bot started")
     await dp.start_polling(bot)
 
 

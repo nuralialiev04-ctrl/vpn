@@ -472,9 +472,18 @@ async def confirm(callback: CallbackQuery):
     asyncio.create_task(send_temporary_key(user_id, user_id))
 
     try:
-        await callback.message.edit_caption("✅ <b>Оплата подтверждена</b>")
+        old_caption = callback.message.caption or ""
+        if "✅ <b>Оплата подтверждена</b>" not in old_caption:
+            new_caption = old_caption + "\n\n✅ <b>Оплата подтверждена</b>"
+        else:
+            new_caption = old_caption
+
+        await callback.message.edit_caption(
+            caption=new_caption,
+            reply_markup=None
+        )
     except TelegramBadRequest:
-        await callback.message.edit_text("✅ <b>Оплата подтверждена</b>")
+        await callback.message.edit_reply_markup(reply_markup=None)
 
     await callback.answer("Готово")
 

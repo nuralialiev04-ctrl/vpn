@@ -150,6 +150,15 @@ async def init_db():
         )
         """)
 
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS receipts (
+            user_id INTEGER PRIMARY KEY,
+            photo_file_id TEXT,
+            username TEXT,
+            created_at TEXT
+        )
+        """)
+
         await db.commit()
 
 
@@ -264,6 +273,36 @@ async def clear_temp_message(user_id: int):
         )
         await db.commit()
 
+# ================= RECEIPTS =================
+
+async def save_receipt(user_id: int, photo_file_id: str, username: str):
+    async with aiosqlite.connect("vpn.db") as db:
+        await db.execute("""
+        INSERT INTO receipts (user_id, photo_file_id, username, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            photo_file_id = excluded.photo_file_id,
+            username = excluded.username,
+            created_at = excluded.created_at
+        """, (user_id, photo_file_id, username, now().isoformat()))
+        await db.commit()
+
+
+async def get_receipt(user_id: int):
+    async with aiosqlite.connect("vpn.db") as db:
+        async with db.execute("""
+            SELECT photo_file_id, username, created_at
+            FROM receipts
+            WHERE user_id = ?
+        """, (user_id,)) as cursor:
+            return await cursor.fetchone()
+
+
+async def clear_receipt(user_id: int):
+    async with aiosqlite.connect("vpn.db") as db:
+        await db.execute("DELETE FROM receipts WHERE user_id = ?", (user_id,))
+        await db.commit()
+
 # ================= KEY COOLDOWN =================
 
 async def get_remaining_cooldown(user_id: int) -> int:
@@ -329,26 +368,14 @@ async def get_stats_text() -> str:
     )
 
 
-async def get_waiting_list_text() -> str:
+async def get_waiting_users():
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute("""
             SELECT user_id, created_at
             FROM payment_waiting
             ORDER BY created_at DESC
         """) as cursor:
-            rows = await cursor.fetchall()
-
-    if not rows:
-        return "⏳ <b>Ожидающих проверку нет</b>"
-
-    lines = ["⏳ <b>Ожидают проверку оплаты</b>\n"]
-    for user_id, created_at in rows:
-        lines.append(
-            f"🆔 <code>{user_id}</code>\n"
-            f"🕒 {created_at}\n"
-        )
-
-    return "\n".join(lines)
+            return await cursor.fetchall()
 
 
 async def get_paid_users_text() -> str:
@@ -397,11 +424,18 @@ def main_menu(user_id: int | None = None):
     ]
 
     if user_id == ADMIN_ID:
-        keyboard.insert(0, [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")])
-        keyboard.insert(1, [InlineKeyboardButton(text="⏳ Ожидают проверку", callback_data="waiting_list")])
-        keyboard.insert(2, [InlineKeyboardButton(text="✅ Уже оплатили", callback_data="paid_list")])
+        keyboard.insert(0, [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin_panel")])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def admin_panel_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="⏳ Ожидают проверку", callback_data="waiting_list")],
+        [InlineKeyboardButton(text="✅ Уже оплатили", callback_data="paid_list")],
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="home")],
+    ])
 
 
 def pay_menu():
@@ -436,6 +470,22 @@ def confirm_kb(user_id: int):
             ),
         ]
     ])
+
+
+def waiting_list_kb(rows):
+    keyboard = []
+
+    for user_id, created_at in rows:
+        short_time = created_at[:16].replace("T", " ")
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"🧾 {user_id} | {short_time}",
+                callback_data=f"open_waiting_{user_id}"
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ================= HELPERS =================
 
@@ -553,6 +603,8 @@ async def receipt(message: Message):
         else "без username"
     )
 
+    await save_receipt(user_id, message.photo[-1].file_id, username)
+
     try:
         await bot.send_photo(
             ADMIN_ID,
@@ -573,6 +625,20 @@ async def receipt(message: Message):
             "Проверьте <code>ADMIN_ID</code> и убедитесь, что администратор написал боту <code>/start</code>."
         )
 
+# ================= ADMIN PANEL =================
+
+@dp.callback_query(F.data == "admin_panel")
+async def admin_panel(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "🛠 <b>Админ-панель</b>\n\nВыберите раздел:",
+        reply_markup=admin_panel_kb()
+    )
+    await callback.answer()
+
 # ================= CONFIRM / REJECT =================
 
 @dp.callback_query(F.data.startswith("confirm_"))
@@ -585,6 +651,7 @@ async def confirm(callback: CallbackQuery):
 
     await set_subscription(user_id, days=365)
     await clear_waiting(user_id)
+    await clear_receipt(user_id)
 
     asyncio.create_task(send_temporary_key(user_id, user_id))
 
@@ -614,6 +681,7 @@ async def reject(callback: CallbackQuery):
     user_id = int(callback.data.split("_")[1])
 
     await clear_waiting(user_id)
+    await clear_receipt(user_id)
 
     try:
         await bot.send_message(user_id, PAYMENT_REJECTED_TEXT, reply_markup=main_menu(user_id))
@@ -702,7 +770,7 @@ async def stats(callback: CallbackQuery):
     text = await get_stats_text()
     await callback.message.edit_text(
         text,
-        reply_markup=main_menu(callback.from_user.id)
+        reply_markup=admin_panel_kb()
     )
     await callback.answer()
 
@@ -713,12 +781,51 @@ async def waiting_list(callback: CallbackQuery):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    text = await get_waiting_list_text()
+    rows = await get_waiting_users()
+
+    if not rows:
+        await callback.message.edit_text(
+            "⏳ <b>Ожидающих проверку нет</b>",
+            reply_markup=admin_panel_kb()
+        )
+        await callback.answer()
+        return
+
     await callback.message.edit_text(
-        text,
-        reply_markup=main_menu(callback.from_user.id)
+        "⏳ <b>Ожидают проверку оплаты</b>\n\nНажмите на пользователя, чтобы открыть чек:",
+        reply_markup=waiting_list_kb(rows)
     )
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("open_waiting_"))
+async def open_waiting(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[2])
+    receipt = await get_receipt(user_id)
+
+    if not receipt:
+        await callback.answer("Чек не найден", show_alert=True)
+        return
+
+    photo_file_id, username, created_at = receipt
+
+    await bot.send_photo(
+        callback.from_user.id,
+        photo=photo_file_id,
+        caption=(
+            "💸 <b>Чек на проверку</b>\n\n"
+            f"🆔 ID: <code>{user_id}</code>\n"
+            f"👤 Username: {username}\n"
+            f"🕒 Создано: <b>{created_at[:16].replace('T', ' ')}</b>"
+        ),
+        reply_markup=confirm_kb(user_id)
+    )
+
+    await callback.answer("Чек открыт")
 
 
 @dp.callback_query(F.data == "paid_list")
@@ -730,7 +837,7 @@ async def paid_list(callback: CallbackQuery):
     text = await get_paid_users_text()
     await callback.message.edit_text(
         text,
-        reply_markup=main_menu(callback.from_user.id)
+        reply_markup=admin_panel_kb()
     )
     await callback.answer()
 

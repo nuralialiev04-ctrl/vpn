@@ -284,6 +284,7 @@ def main_menu():
         [InlineKeyboardButton(text="📅 Моя подписка", callback_data="sub")],
         [InlineKeyboardButton(text="📖 Как подключиться", url=INSTRUCTION_URL)],
         [InlineKeyboardButton(text="💬 Поддержка", url=SUPPORT_URL)],
+        [InlineKeyboardButton(text="⭐️ Отзывы клиентов", url=REVIEWS_URL)],
     ])
 
 

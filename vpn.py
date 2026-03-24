@@ -40,8 +40,6 @@ BRAND_NAME = os.getenv("BRAND_NAME", "Black VPN")
 SUBSCRIPTION_PRICE = os.getenv("SUBSCRIPTION_PRICE", "699")
 SUBSCRIPTION_PERIOD = os.getenv("SUBSCRIPTION_PERIOD", "12 месяцев")
 
-# ================= CHECK ENV =================
-
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден в .env")
 if not ADMIN_ID:
@@ -161,7 +159,6 @@ async def init_db():
 
         await db.commit()
 
-
 async def ensure_user_exists(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
         await db.execute("""
@@ -169,7 +166,6 @@ async def ensure_user_exists(user_id: int):
         VALUES (?, NULL)
         """, (user_id,))
         await db.commit()
-
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
@@ -203,7 +199,6 @@ async def set_subscription(user_id: int, days: int = 365):
         """, (user_id, new_expire.isoformat()))
         await db.commit()
 
-
 async def get_subscription(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute(
@@ -224,7 +219,6 @@ async def set_waiting(user_id: int):
         """, (user_id, now().isoformat()))
         await db.commit()
 
-
 async def is_waiting(user_id: int) -> bool:
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute(
@@ -234,7 +228,6 @@ async def is_waiting(user_id: int) -> bool:
             row = await cursor.fetchone()
             return row is not None
 
-
 async def clear_waiting(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
         await db.execute(
@@ -242,7 +235,6 @@ async def clear_waiting(user_id: int):
             (user_id,)
         )
         await db.commit()
-
 
 async def clear_all_waiting():
     async with aiosqlite.connect("vpn.db") as db:
@@ -260,7 +252,6 @@ async def save_temp_message(user_id: int, message_id: int):
         """, (user_id, message_id))
         await db.commit()
 
-
 async def get_temp_message(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute(
@@ -269,7 +260,6 @@ async def get_temp_message(user_id: int):
         ) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else None
-
 
 async def clear_temp_message(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
@@ -293,7 +283,6 @@ async def save_receipt(user_id: int, photo_file_id: str, username: str):
         """, (user_id, photo_file_id, username, now().isoformat()))
         await db.commit()
 
-
 async def get_receipt(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute("""
@@ -303,12 +292,10 @@ async def get_receipt(user_id: int):
         """, (user_id,)) as cursor:
             return await cursor.fetchone()
 
-
 async def clear_receipt(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
         await db.execute("DELETE FROM receipts WHERE user_id = ?", (user_id,))
         await db.commit()
-
 
 async def clear_all_receipts():
     async with aiosqlite.connect("vpn.db") as db:
@@ -337,7 +324,6 @@ async def get_remaining_cooldown(user_id: int) -> int:
     remaining = KEY_COOLDOWN_SECONDS - seconds_passed
     return max(0, remaining)
 
-
 async def update_key_sent_time(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
         await db.execute("""
@@ -347,7 +333,7 @@ async def update_key_sent_time(user_id: int):
         """, (user_id, now().isoformat()))
         await db.commit()
 
-# ================= STATISTICS =================
+# ================= STATS =================
 
 async def get_stats_text() -> str:
     async with aiosqlite.connect("vpn.db") as db:
@@ -379,7 +365,6 @@ async def get_stats_text() -> str:
         f"⏳ Ожидают проверку оплаты: <b>{waiting_payments}</b>"
     )
 
-
 async def get_waiting_users():
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute("""
@@ -388,7 +373,6 @@ async def get_waiting_users():
             ORDER BY created_at DESC
         """) as cursor:
             return await cursor.fetchall()
-
 
 async def get_paid_users():
     async with aiosqlite.connect("vpn.db") as db:
@@ -418,7 +402,6 @@ def main_menu(user_id: int | None = None):
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-
 def admin_panel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
@@ -428,7 +411,6 @@ def admin_panel_kb():
         [InlineKeyboardButton(text="🏠 В меню", callback_data="home")],
     ])
 
-
 def confirm_clear_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -437,7 +419,6 @@ def confirm_clear_kb():
         ],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
     ])
-
 
 def pay_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -457,7 +438,6 @@ def pay_menu():
         [InlineKeyboardButton(text="🏠 В меню", callback_data="home")],
     ])
 
-
 def confirm_kb(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -471,7 +451,6 @@ def confirm_kb(user_id: int):
             ),
         ]
     ])
-
 
 def waiting_list_kb(rows):
     keyboard = []
@@ -487,7 +466,6 @@ def waiting_list_kb(rows):
 
     keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
 
 def paid_list_kb(rows):
     keyboard = []
@@ -526,13 +504,11 @@ async def send_temporary_key(chat_id: int, user_id: int):
     except Exception:
         pass
 
-
 async def safe_delete_message(chat_id: int, message_id: int):
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
-
 
 def format_subscription_text(expire: datetime) -> str:
     days_left = (expire - now()).days
@@ -573,7 +549,6 @@ async def buy(callback: CallbackQuery):
         reply_markup=pay_menu()
     )
     await callback.answer()
-
 
 @dp.callback_query(F.data == "paid")
 async def paid(callback: CallbackQuery):
@@ -687,7 +662,6 @@ async def confirm(callback: CallbackQuery):
 
     await callback.answer("Готово")
 
-
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -790,7 +764,6 @@ async def stats(callback: CallbackQuery):
     )
     await callback.answer()
 
-
 @dp.callback_query(F.data == "waiting_list")
 async def waiting_list(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -812,7 +785,6 @@ async def waiting_list(callback: CallbackQuery):
         reply_markup=waiting_list_kb(rows)
     )
     await callback.answer()
-
 
 @dp.callback_query(F.data.startswith("open_waiting_"))
 async def open_waiting(callback: CallbackQuery):
@@ -843,7 +815,6 @@ async def open_waiting(callback: CallbackQuery):
 
     await callback.answer("Чек открыт")
 
-
 @dp.callback_query(F.data == "paid_list")
 async def paid_list(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -866,7 +837,6 @@ async def paid_list(callback: CallbackQuery):
     )
     await callback.answer()
 
-
 @dp.callback_query(F.data.startswith("open_paid_"))
 async def open_paid(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -876,12 +846,13 @@ async def open_paid(callback: CallbackQuery):
     user_id = int(callback.data.split("_")[2])
 
     async with aiosqlite.connect("vpn.db") as db:
-        row = await db.execute_fetchone("""
+        async with db.execute("""
             SELECT u.subscription_until, r.photo_file_id, r.username, r.created_at
             FROM users u
             LEFT JOIN receipts r ON u.user_id = r.user_id
             WHERE u.user_id = ?
-        """, (user_id,))
+        """, (user_id,)) as cursor:
+            row = await cursor.fetchone()
 
     if not row:
         await callback.answer("Пользователь не найден", show_alert=True)
@@ -915,7 +886,7 @@ async def open_paid(callback: CallbackQuery):
 
     await callback.answer("Данные открыты")
 
-# ================= CLEAR WITH CONFIRM =================
+# ================= CLEAR WAITING =================
 
 @dp.callback_query(F.data == "clear_waiting_all")
 async def clear_waiting_confirm(callback: CallbackQuery):
@@ -929,7 +900,6 @@ async def clear_waiting_confirm(callback: CallbackQuery):
         reply_markup=confirm_clear_kb()
     )
     await callback.answer()
-
 
 @dp.callback_query(F.data == "confirm_clear_yes")
 async def clear_waiting_yes(callback: CallbackQuery):
@@ -945,7 +915,6 @@ async def clear_waiting_yes(callback: CallbackQuery):
         reply_markup=admin_panel_kb()
     )
     await callback.answer("Очищено")
-
 
 @dp.callback_query(F.data == "confirm_clear_no")
 async def clear_waiting_no(callback: CallbackQuery):
@@ -975,7 +944,6 @@ async def main():
     await init_db()
     print("✅ Bot started")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())

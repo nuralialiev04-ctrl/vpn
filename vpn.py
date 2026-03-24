@@ -781,8 +781,10 @@ async def admin_panel(callback: CallbackQuery):
 
 # ================= CONFIRM / REJECT =================
 
-@dp.callback_query(F.data.startswith("confirm_"))
+@dp.callback_query(F.data.regexp(r"^confirm_\d+$"))
 async def confirm(callback: CallbackQuery):
+    await callback.answer()
+
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -812,13 +814,16 @@ async def confirm(callback: CallbackQuery):
             reply_markup=None
         )
     except TelegramBadRequest:
-        await callback.message.edit_reply_markup(reply_markup=None)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception as e:
+            logger.warning("Не удалось убрать клавиатуру после confirm: %s", e)
 
-    await callback.answer("Готово")
 
-
-@dp.callback_query(F.data.startswith("reject_"))
+@dp.callback_query(F.data.regexp(r"^reject_\d+$"))
 async def reject(callback: CallbackQuery):
+    await callback.answer()
+
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -835,7 +840,11 @@ async def reject(callback: CallbackQuery):
     logger.info("Оплата отклонена: admin_id=%s user_id=%s", callback.from_user.id, user_id)
 
     try:
-        await bot.send_message(user_id, PAYMENT_REJECTED_TEXT, reply_markup=main_menu(user_id))
+        await bot.send_message(
+            user_id,
+            PAYMENT_REJECTED_TEXT,
+            reply_markup=main_menu(user_id)
+        )
     except Exception as e:
         logger.warning("Не удалось отправить уведомление об отказе: user_id=%s error=%s", user_id, e)
 
@@ -851,9 +860,10 @@ async def reject(callback: CallbackQuery):
             reply_markup=None
         )
     except TelegramBadRequest:
-        await callback.message.edit_reply_markup(reply_markup=None)
-
-    await callback.answer("Оплата отклонена")
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception as e:
+            logger.warning("Не удалось убрать клавиатуру после reject: %s", e)
 
 # ================= KEY =================
 
@@ -1096,6 +1106,8 @@ async def open_paid(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "clear_waiting_all")
 async def clear_waiting_confirm(callback: CallbackQuery):
+    await callback.answer()
+
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -1105,11 +1117,12 @@ async def clear_waiting_confirm(callback: CallbackQuery):
         "Это действие нельзя отменить.",
         reply_markup=confirm_clear_kb()
     )
-    await callback.answer()
 
 
 @dp.callback_query(F.data == "confirm_clear_yes")
 async def clear_waiting_yes(callback: CallbackQuery):
+    await callback.answer()
+
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -1118,32 +1131,41 @@ async def clear_waiting_yes(callback: CallbackQuery):
         await clear_receipts_for_waiting_users()
         await clear_all_waiting()
 
+        logger.info("Админ очистил все ожидающие заявки: admin_id=%s", callback.from_user.id)
+
         await callback.message.edit_text(
             "🗑 <b>Все ожидающие заявки удалены</b>",
             reply_markup=admin_panel_kb()
         )
-        await callback.answer("Очищено")
-        logger.info("Админ очистил все ожидающие заявки: admin_id=%s", callback.from_user.id)
     except Exception as e:
         logger.exception("Ошибка при очистке ожидающих")
-        await callback.answer("Ошибка очистки", show_alert=True)
-        await bot.send_message(
-            ADMIN_ID,
-            f"❌ Ошибка при очистке:\n<code>{e}</code>"
-        )
+
+        try:
+            await callback.message.edit_text(
+                f"❌ <b>Ошибка очистки</b>\n\n<code>{e}</code>",
+                reply_markup=admin_panel_kb()
+            )
+        except Exception:
+            pass
 
 
 @dp.callback_query(F.data == "confirm_clear_no")
 async def clear_waiting_no(callback: CallbackQuery):
+    await callback.answer()
+
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    await callback.message.edit_text(
-        "❌ <b>Очистка отменена</b>",
-        reply_markup=admin_panel_kb()
-    )
-    await callback.answer("Отменено")
+    logger.info("Админ отменил очистку ожидающих: admin_id=%s", callback.from_user.id)
+
+    try:
+        await callback.message.edit_text(
+            "❌ <b>Очистка отменена</b>",
+            reply_markup=admin_panel_kb()
+        )
+    except Exception as e:
+        logger.warning("Ошибка при отмене очистки: %s", e)
 
 # ================= HOME =================
 

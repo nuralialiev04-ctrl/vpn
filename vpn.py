@@ -24,17 +24,23 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 VPN_KEY = os.getenv("VPN_KEY")
+
 PAYMENT_CARD = os.getenv("PAYMENT_CARD", "")
 PAYMENT_PHONE = os.getenv("PAYMENT_PHONE", "")
 PAYMENT_BANK = os.getenv("PAYMENT_BANK", "Т-Банк")
+
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/supp_vpntock1a")
-REVIEWS_URL = os.getenv("REVIEWS_URL", "https://t.me/black_vpn_chat")
 INSTRUCTION_URL = os.getenv("INSTRUCTION_URL", "https://t.me/blackvpn_connect")
+REVIEWS_URL = os.getenv("REVIEWS_URL", "https://t.me/black_vpn_chat")
+
 KEY_LIFETIME_SECONDS = int(os.getenv("KEY_LIFETIME_SECONDS", "45"))
 KEY_COOLDOWN_SECONDS = int(os.getenv("KEY_COOLDOWN_SECONDS", "60"))
+
 BRAND_NAME = os.getenv("BRAND_NAME", "Black VPN")
 SUBSCRIPTION_PRICE = os.getenv("SUBSCRIPTION_PRICE", "699")
 SUBSCRIPTION_PERIOD = os.getenv("SUBSCRIPTION_PERIOD", "12 месяцев")
+
+# ================= CHECK ENV =================
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден в .env")

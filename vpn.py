@@ -148,6 +148,15 @@ async def init_db():
         await db.commit()
 
 
+async def ensure_user_exists(user_id: int):
+    async with aiosqlite.connect("vpn.db") as db:
+        await db.execute("""
+        INSERT OR IGNORE INTO users (user_id, subscription_until)
+        VALUES (?, NULL)
+        """, (user_id,))
+        await db.commit()
+
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -282,17 +291,54 @@ async def update_key_sent_time(user_id: int):
         """, (user_id, now().isoformat()))
         await db.commit()
 
+# ================= STATISTICS =================
+
+async def get_stats_text() -> str:
+    async with aiosqlite.connect("vpn.db") as db:
+        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
+            total_users = (await cursor.fetchone())[0]
+
+        async with db.execute("""
+            SELECT COUNT(*) FROM users
+            WHERE subscription_until IS NOT NULL
+            AND subscription_until > ?
+        """, (now().isoformat(),)) as cursor:
+            active_subs = (await cursor.fetchone())[0]
+
+        async with db.execute("""
+            SELECT COUNT(*) FROM users
+            WHERE subscription_until IS NOT NULL
+            AND subscription_until <= ?
+        """, (now().isoformat(),)) as cursor:
+            expired_subs = (await cursor.fetchone())[0]
+
+        async with db.execute("SELECT COUNT(*) FROM payment_waiting") as cursor:
+            waiting_payments = (await cursor.fetchone())[0]
+
+    return (
+        "📊 <b>Статистика бота</b>\n\n"
+        f"👥 Всего пользователей: <b>{total_users}</b>\n"
+        f"✅ Активных подписок: <b>{active_subs}</b>\n"
+        f"❌ Истёкших подписок: <b>{expired_subs}</b>\n"
+        f"⏳ Ожидают проверку оплаты: <b>{waiting_payments}</b>"
+    )
+
 # ================= KEYBOARDS =================
 
-def main_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
+def main_menu(user_id: int | None = None):
+    keyboard = [
         [InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy")],
         [InlineKeyboardButton(text="🔑 Получить ключ", callback_data="key")],
         [InlineKeyboardButton(text="📅 Моя подписка", callback_data="sub")],
         [InlineKeyboardButton(text="📖 Как подключиться", url=INSTRUCTION_URL)],
         [InlineKeyboardButton(text="⭐️ Отзывы клиентов", url=REVIEWS_URL)],
         [InlineKeyboardButton(text="💬 Поддержка", url=SUPPORT_URL)],
-    ])
+    ]
+
+    if user_id == ADMIN_ID:
+        keyboard.insert(0, [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def pay_menu():
@@ -368,9 +414,10 @@ def format_subscription_text(expire: datetime) -> str:
 
 @dp.message(CommandStart())
 async def start(message: Message):
+    await ensure_user_exists(message.from_user.id)
     await message.answer(
         start_text(message.from_user.first_name),
-        reply_markup=main_menu()
+        reply_markup=main_menu(message.from_user.id)
     )
 
 # ================= BUY =================
@@ -496,7 +543,7 @@ async def key(callback: CallbackQuery):
     sub_value = await get_subscription(user_id)
     if not sub_value:
         await callback.answer("Нет подписки", show_alert=True)
-        await callback.message.answer(NO_SUB_TEXT, reply_markup=main_menu())
+        await callback.message.answer(NO_SUB_TEXT, reply_markup=main_menu(callback.from_user.id))
         return
 
     try:
@@ -507,7 +554,7 @@ async def key(callback: CallbackQuery):
 
     if expire <= now():
         await callback.answer("Подписка истекла", show_alert=True)
-        await callback.message.answer(EXPIRED_SUB_TEXT, reply_markup=main_menu())
+        await callback.message.answer(EXPIRED_SUB_TEXT, reply_markup=main_menu(callback.from_user.id))
         return
 
     remaining = await get_remaining_cooldown(user_id)
@@ -539,7 +586,22 @@ async def sub(callback: CallbackQuery):
         except ValueError:
             text = "❌ <b>Не удалось прочитать данные подписки</b>"
 
-    await callback.message.edit_text(text, reply_markup=main_menu())
+    await callback.message.edit_text(text, reply_markup=main_menu(callback.from_user.id))
+    await callback.answer()
+
+# ================= STATS =================
+
+@dp.callback_query(F.data == "stats")
+async def stats(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    text = await get_stats_text()
+    await callback.message.edit_text(
+        text,
+        reply_markup=main_menu(callback.from_user.id)
+    )
     await callback.answer()
 
 # ================= HOME =================
@@ -548,7 +610,7 @@ async def sub(callback: CallbackQuery):
 async def home(callback: CallbackQuery):
     await callback.message.edit_text(
         HOME_TEXT,
-        reply_markup=main_menu()
+        reply_markup=main_menu(callback.from_user.id)
     )
     await callback.answer()
 

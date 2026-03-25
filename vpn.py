@@ -559,6 +559,17 @@ def pay_menu():
     ])
 
 
+def key_message_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="📋 Скопировать ключ",
+                copy_text=CopyTextButton(text=VPN_KEY)
+            )
+        ]
+    ])
+
+
 def confirm_kb(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -616,7 +627,9 @@ async def send_temporary_key(chat_id: int, user_id: int):
             f"<code>{VPN_KEY}</code>\n\n"
             f"👤 Доступ выдан для ID: <code>{user_id}</code>\n"
             f"🕒 Сообщение будет удалено через <b>{KEY_LIFETIME_SECONDS}</b> сек.\n\n"
-            "⚠️ Не передавайте ключ третьим лицам."
+            "Нажмите кнопку ниже, чтобы быстро скопировать ключ.\n"
+            "⚠️ Не передавайте ключ третьим лицам.",
+            reply_markup=key_message_kb()
         )
         logger.info("Временный ключ отправлен: user_id=%s chat_id=%s", user_id, chat_id)
 

@@ -128,6 +128,11 @@ EXPIRED_SUB_TEXT = (
     "Продлите подписку, чтобы снова получить VPN-ключ."
 )
 
+KEY_REPEAT_BLOCKED_TEXT = (
+    "🚫 <b>Повторное получение ключа отключено</b>\n\n"
+    "Если у вас нет доступа к ключу, свяжитесь с поддержкой."
+)
+
 # ================= DATABASE =================
 
 async def migrate_receipts_table(db: aiosqlite.Connection):
@@ -227,6 +232,13 @@ async def init_db():
             username TEXT,
             caption TEXT,
             created_at TEXT NOT NULL
+        )
+        """)
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS repeat_key_block (
+            user_id INTEGER PRIMARY KEY,
+            blocked_at TEXT NOT NULL
         )
         """)
 
@@ -440,6 +452,47 @@ async def update_key_sent_time(user_id: int):
         """, (user_id, now().isoformat()))
         await db.commit()
 
+# ================= REPEAT KEY ACCESS BLOCK =================
+
+async def block_repeat_key_access(user_id: int):
+    async with aiosqlite.connect("vpn.db") as db:
+        await db.execute("""
+        INSERT INTO repeat_key_block (user_id, blocked_at)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET blocked_at = excluded.blocked_at
+        """, (user_id, now().isoformat()))
+        await db.commit()
+
+    logger.info("Повторное получение ключа заблокировано: user_id=%s", user_id)
+
+
+async def unblock_repeat_key_access(user_id: int):
+    async with aiosqlite.connect("vpn.db") as db:
+        await db.execute("DELETE FROM repeat_key_block WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+    logger.info("Повторное получение ключа разблокировано: user_id=%s", user_id)
+
+
+async def is_repeat_key_blocked(user_id: int) -> bool:
+    async with aiosqlite.connect("vpn.db") as db:
+        async with db.execute(
+            "SELECT 1 FROM repeat_key_block WHERE user_id = ?",
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row is not None
+
+
+async def get_repeat_key_blocked_users():
+    async with aiosqlite.connect("vpn.db") as db:
+        async with db.execute("""
+            SELECT user_id, blocked_at
+            FROM repeat_key_block
+            ORDER BY blocked_at DESC
+        """) as cursor:
+            return await cursor.fetchall()
+
 # ================= STATS =================
 
 async def get_stats_text() -> str:
@@ -464,12 +517,16 @@ async def get_stats_text() -> str:
         async with db.execute("SELECT COUNT(*) FROM payment_waiting") as cursor:
             waiting_payments = (await cursor.fetchone())[0]
 
+        async with db.execute("SELECT COUNT(*) FROM repeat_key_block") as cursor:
+            repeat_key_blocked = (await cursor.fetchone())[0]
+
     return (
         "📊 <b>Статистика бота</b>\n\n"
         f"👥 Всего пользователей: <b>{total_users}</b>\n"
         f"✅ Активных подписок: <b>{active_subs}</b>\n"
         f"❌ Истёкших подписок: <b>{expired_subs}</b>\n"
-        f"⏳ Ожидают проверку оплаты: <b>{waiting_payments}</b>"
+        f"⏳ Ожидают проверку оплаты: <b>{waiting_payments}</b>\n"
+        f"🚫 Без повторной выдачи ключа: <b>{repeat_key_blocked}</b>"
     )
 
 
@@ -525,6 +582,7 @@ def admin_panel_kb():
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="⏳ Ожидают проверку", callback_data="waiting_list")],
         [InlineKeyboardButton(text="✅ Уже оплатили", callback_data="paid_list")],
+        [InlineKeyboardButton(text="🚫 Без повторной выдачи", callback_data="repeat_key_blocked_list")],
         [InlineKeyboardButton(text="🗑 Очистить ожидающих", callback_data="clear_waiting_all")],
         [InlineKeyboardButton(text="🏠 В меню", callback_data="home")],
     ])
@@ -610,6 +668,47 @@ def paid_list_kb(rows):
             InlineKeyboardButton(
                 text=f"✅ {name} | {user_id}",
                 callback_data=f"open_paid_{user_id}"
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def repeat_key_user_actions_kb(user_id: int, blocked: bool):
+    keyboard = []
+
+    if blocked:
+        keyboard.append([
+            InlineKeyboardButton(
+                text="✅ Вернуть доступ к повторному получению ключа",
+                callback_data=f"unblock_repeat_key_{user_id}"
+            )
+        ])
+    else:
+        keyboard.append([
+            InlineKeyboardButton(
+                text="🚫 Забрать доступ к повторному получению ключа",
+                callback_data=f"block_repeat_key_{user_id}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="paid_list")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def repeat_key_blocked_list_kb(rows):
+    keyboard = []
+
+    for user_id, blocked_at in rows:
+        short_time = blocked_at[:16].replace("T", " ")
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"🚫 ID {user_id} • {short_time}",
+                callback_data=f"open_repeat_blocked_{user_id}"
             )
         ])
 
@@ -910,6 +1009,14 @@ async def key(callback: CallbackQuery):
         )
         return
 
+    if await is_repeat_key_blocked(user_id):
+        await callback.answer("Повторная выдача отключена", show_alert=True)
+        await callback.message.answer(
+            KEY_REPEAT_BLOCKED_TEXT,
+            reply_markup=main_menu(callback.from_user.id)
+        )
+        return
+
     await update_key_sent_time(user_id)
     logger.info("Пользователь запросил ключ: user_id=%s", user_id)
 
@@ -1084,14 +1191,18 @@ async def open_paid(callback: CallbackQuery):
         await callback.answer("Пользователь не найден", show_alert=True)
         return
 
+    repeat_blocked = await is_repeat_key_blocked(user_id)
+
     subscription_until, photo_file_id, username, receipt_caption, created_at = row
     username = username or "без username"
     sub_text = subscription_until[:16].replace("T", " ") if subscription_until else "нет"
+    repeat_status = "🚫 отключено" if repeat_blocked else "✅ разрешено"
 
     caption = (
         "✅ <b>Оплативший пользователь</b>\n\n"
         f"🆔 ID: <code>{user_id}</code>\n"
         f"👤 Username: {username}\n"
+        f"🔁 Повторное получение ключа: <b>{repeat_status}</b>\n"
         f"📅 Подписка до: <b>{sub_text}</b>\n"
     )
 
@@ -1105,15 +1216,180 @@ async def open_paid(callback: CallbackQuery):
         await bot.send_photo(
             callback.from_user.id,
             photo_file_id,
-            caption=caption
+            caption=caption,
+            reply_markup=repeat_key_user_actions_kb(user_id, repeat_blocked)
         )
     else:
         await bot.send_message(
             callback.from_user.id,
-            caption + "\n❌ Фото чека не найдено"
+            caption + "\n❌ Фото чека не найдено",
+            reply_markup=repeat_key_user_actions_kb(user_id, repeat_blocked)
         )
 
     await callback.answer("Данные открыты")
+
+# ================= REPEAT KEY BLOCK ADMIN =================
+
+@dp.callback_query(F.data == "repeat_key_blocked_list")
+async def repeat_key_blocked_list(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    rows = await get_repeat_key_blocked_users()
+
+    if not rows:
+        await callback.message.edit_text(
+            "🚫 <b>Пользователей без повторной выдачи нет</b>",
+            reply_markup=admin_panel_kb()
+        )
+        await callback.answer()
+        return
+
+    await callback.message.edit_text(
+        "🚫 <b>Повторное получение ключа отключено у:</b>\n\nНажмите на пользователя:",
+        reply_markup=repeat_key_blocked_list_kb(rows)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("open_repeat_blocked_"))
+async def open_repeat_blocked(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[3])
+
+    async with aiosqlite.connect("vpn.db") as db:
+        async with db.execute("""
+            SELECT subscription_until
+            FROM users
+            WHERE user_id = ?
+        """, (user_id,)) as cursor:
+            row = await cursor.fetchone()
+
+        async with db.execute("""
+            SELECT blocked_at
+            FROM repeat_key_block
+            WHERE user_id = ?
+        """, (user_id,)) as cursor:
+            block_row = await cursor.fetchone()
+
+    subscription_until = row[0] if row else None
+    blocked_at = block_row[0] if block_row else None
+    sub_text = subscription_until[:16].replace("T", " ") if subscription_until else "нет"
+    blocked_text = blocked_at[:16].replace("T", " ") if blocked_at else "неизвестно"
+
+    text = (
+        "🚫 <b>Пользователь без повторной выдачи ключа</b>\n\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"📅 Подписка до: <b>{sub_text}</b>\n"
+        f"🕒 Ограничение включено: <b>{blocked_text}</b>"
+    )
+
+    await bot.send_message(
+        callback.from_user.id,
+        text,
+        reply_markup=repeat_key_user_actions_kb(user_id, True)
+    )
+
+    await callback.answer("Данные открыты")
+
+
+@dp.callback_query(F.data.regexp(r"^block_repeat_key_\d+$"))
+async def block_repeat_key(callback: CallbackQuery):
+    await callback.answer()
+
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[3])
+
+    await block_repeat_key_access(user_id)
+
+    try:
+        await bot.send_message(
+            user_id,
+            "🚫 <b>Повторное получение VPN-ключа отключено</b>\n\n"
+            "Если это ошибка — обратитесь в поддержку.",
+            reply_markup=main_menu(user_id)
+        )
+    except Exception as e:
+        logger.warning("Не удалось уведомить пользователя о запрете повторной выдачи: user_id=%s error=%s", user_id, e)
+
+    try:
+        if callback.message.photo:
+            new_caption = callback.message.caption or ""
+            if "🚫 <b>Повторное получение ключа отключено</b>" not in new_caption:
+                new_caption += "\n\n🚫 <b>Повторное получение ключа отключено</b>"
+
+            await callback.message.edit_caption(
+                caption=new_caption,
+                reply_markup=repeat_key_user_actions_kb(user_id, True)
+            )
+        else:
+            new_text = callback.message.text or ""
+            if "🚫 <b>Повторное получение ключа отключено</b>" not in new_text:
+                new_text += "\n\n🚫 <b>Повторное получение ключа отключено</b>"
+
+            await callback.message.edit_text(
+                new_text,
+                reply_markup=repeat_key_user_actions_kb(user_id, True)
+            )
+    except Exception as e:
+        logger.warning("Не удалось обновить сообщение после блокировки повторной выдачи: %s", e)
+
+    logger.info("Админ забрал доступ к повторному получению ключа: admin_id=%s user_id=%s", callback.from_user.id, user_id)
+
+
+@dp.callback_query(F.data.regexp(r"^unblock_repeat_key_\d+$"))
+async def unblock_repeat_key(callback: CallbackQuery):
+    await callback.answer()
+
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(callback.data.split("_")[3])
+
+    await unblock_repeat_key_access(user_id)
+
+    try:
+        await bot.send_message(
+            user_id,
+            "✅ <b>Повторное получение VPN-ключа снова доступно</b>",
+            reply_markup=main_menu(user_id)
+        )
+    except Exception as e:
+        logger.warning("Не удалось уведомить пользователя о возврате повторной выдачи: user_id=%s error=%s", user_id, e)
+
+    try:
+        if callback.message.photo:
+            new_caption = callback.message.caption or ""
+            new_caption = new_caption.replace("\n\n🚫 <b>Повторное получение ключа отключено</b>", "")
+            if "✅ <b>Повторное получение ключа снова доступно</b>" not in new_caption:
+                new_caption += "\n\n✅ <b>Повторное получение ключа снова доступно</b>"
+
+            await callback.message.edit_caption(
+                caption=new_caption,
+                reply_markup=repeat_key_user_actions_kb(user_id, False)
+            )
+        else:
+            new_text = callback.message.text or ""
+            new_text = new_text.replace("\n\n🚫 <b>Повторное получение ключа отключено</b>", "")
+            if "✅ <b>Повторное получение ключа снова доступно</b>" not in new_text:
+                new_text += "\n\n✅ <b>Повторное получение ключа снова доступно</b>"
+
+            await callback.message.edit_text(
+                new_text,
+                reply_markup=repeat_key_user_actions_kb(user_id, False)
+            )
+    except Exception as e:
+        logger.warning("Не удалось обновить сообщение после разблокировки повторной выдачи: %s", e)
+
+    logger.info("Админ вернул доступ к повторному получению ключа: admin_id=%s user_id=%s", callback.from_user.id, user_id)
 
 # ================= CLEAR WAITING =================
 

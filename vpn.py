@@ -32,7 +32,6 @@ logger = logging.getLogger("vpn_bot")
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 VPN_KEY = os.getenv("VPN_KEY")
 
 PAYMENT_CARD = os.getenv("PAYMENT_CARD", "")
@@ -50,12 +49,40 @@ BRAND_NAME = os.getenv("BRAND_NAME", "Black VPN")
 SUBSCRIPTION_PRICE = os.getenv("SUBSCRIPTION_PRICE", "699")
 SUBSCRIPTION_PERIOD = os.getenv("SUBSCRIPTION_PERIOD", "12 месяцев")
 
+
+def parse_admin_ids() -> set[int]:
+    admin_ids: set[int] = set()
+
+    admin_id_raw = os.getenv("ADMIN_ID", "").strip()
+    if admin_id_raw:
+        try:
+            admin_ids.add(int(admin_id_raw))
+        except ValueError:
+            raise ValueError("ADMIN_ID должен быть числом")
+
+    admin_ids_raw = os.getenv("ADMIN_IDS", "").strip()
+    if admin_ids_raw:
+        for item in admin_ids_raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                admin_ids.add(int(item))
+            except ValueError:
+                raise ValueError("ADMIN_IDS должен содержать числа, разделенные запятыми")
+
+    return admin_ids
+
+
+ADMIN_IDS = parse_admin_ids()
+PRIMARY_ADMIN_ID = min(ADMIN_IDS) if ADMIN_IDS else 0
+
 # ================= CHECK ENV =================
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден в .env")
-if not ADMIN_ID:
-    raise ValueError("ADMIN_ID не найден в .env")
+if not ADMIN_IDS:
+    raise ValueError("Укажите ADMIN_ID или ADMIN_IDS в .env")
 if not VPN_KEY:
     raise ValueError("VPN_KEY не найден в .env")
 if not PAYMENT_CARD:
@@ -73,6 +100,7 @@ dp = Dispatcher()
 
 # ================= TEXTS =================
 
+
 def start_text(first_name: str | None) -> str:
     return (
         f"⚫️ <b>{BRAND_NAME}</b>\n\n"
@@ -83,6 +111,7 @@ def start_text(first_name: str | None) -> str:
         "• приватность без лишнего шума\n\n"
         "Выберите нужный раздел ниже 👇"
     )
+
 
 BUY_TEXT = (
     "💎 <b>Премиум-доступ</b>\n\n"
@@ -134,6 +163,7 @@ KEY_REPEAT_BLOCKED_TEXT = (
 )
 
 # ================= DATABASE =================
+
 
 async def migrate_receipts_table(db: aiosqlite.Connection):
     async with db.execute("PRAGMA table_info(receipts)") as cursor:
@@ -260,10 +290,17 @@ async def ensure_user_exists(user_id: int):
         await db.commit()
 
 
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
+
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
 # ================= SUBSCRIPTIONS =================
+
 
 async def set_subscription(user_id: int, days: int = 365):
     async with aiosqlite.connect("vpn.db") as db:
@@ -305,6 +342,7 @@ async def get_subscription(user_id: int):
             return row[0] if row else None
 
 # ================= PAYMENT WAITING =================
+
 
 async def set_waiting(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
@@ -359,6 +397,7 @@ async def clear_all_waiting():
 
 # ================= TEMP MESSAGE =================
 
+
 async def save_temp_message(user_id: int, message_id: int):
     async with aiosqlite.connect("vpn.db") as db:
         await db.execute("""
@@ -388,6 +427,7 @@ async def clear_temp_message(user_id: int):
         await db.commit()
 
 # ================= RECEIPTS =================
+
 
 async def save_receipt(user_id: int, photo_file_id: str, username: str, caption: str | None = None):
     async with aiosqlite.connect("vpn.db") as db:
@@ -421,6 +461,7 @@ async def clear_receipt(user_id: int):
 
 # ================= KEY COOLDOWN =================
 
+
 async def get_remaining_cooldown(user_id: int) -> int:
     async with aiosqlite.connect("vpn.db") as db:
         async with db.execute(
@@ -453,6 +494,7 @@ async def update_key_sent_time(user_id: int):
         await db.commit()
 
 # ================= REPEAT KEY ACCESS BLOCK =================
+
 
 async def block_repeat_key_access(user_id: int):
     async with aiosqlite.connect("vpn.db") as db:
@@ -494,6 +536,7 @@ async def get_repeat_key_blocked_users():
             return await cursor.fetchall()
 
 # ================= STATS =================
+
 
 async def get_stats_text() -> str:
     async with aiosqlite.connect("vpn.db") as db:
@@ -561,6 +604,8 @@ async def get_paid_users():
 
 # ================= KEYBOARDS =================
 
+
+
 def main_menu(user_id: int | None = None):
     keyboard = [
         [InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy")],
@@ -571,10 +616,11 @@ def main_menu(user_id: int | None = None):
         [InlineKeyboardButton(text="💬 Поддержка", url=SUPPORT_URL)],
     ]
 
-    if user_id == ADMIN_ID:
+    if user_id is not None and is_admin(user_id):
         keyboard.insert(0, [InlineKeyboardButton(text="🛠 Админ панель", callback_data="admin_panel")])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
 
 
 def admin_panel_kb():
@@ -588,6 +634,7 @@ def admin_panel_kb():
     ])
 
 
+
 def confirm_clear_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -596,6 +643,7 @@ def confirm_clear_kb():
         ],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
     ])
+
 
 
 def pay_menu():
@@ -617,6 +665,7 @@ def pay_menu():
     ])
 
 
+
 def key_message_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -626,6 +675,7 @@ def key_message_kb():
             )
         ]
     ])
+
 
 
 def confirm_kb(user_id: int):
@@ -641,6 +691,7 @@ def confirm_kb(user_id: int):
             ),
         ]
     ])
+
 
 
 def waiting_list_kb(rows):
@@ -659,6 +710,7 @@ def waiting_list_kb(rows):
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+
 def paid_list_kb(rows):
     keyboard = []
 
@@ -673,6 +725,7 @@ def paid_list_kb(rows):
 
     keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
 
 
 def repeat_key_user_actions_kb(user_id: int, blocked: bool):
@@ -700,6 +753,7 @@ def repeat_key_user_actions_kb(user_id: int, blocked: bool):
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+
 def repeat_key_blocked_list_kb(rows):
     keyboard = []
 
@@ -716,6 +770,31 @@ def repeat_key_blocked_list_kb(rows):
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ================= HELPERS =================
+
+
+async def notify_admins_about_receipt(photo_file_id: str, caption: str, user_id: int):
+    sent_to_any_admin = False
+    last_error: Exception | None = None
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_photo(
+                admin_id,
+                photo=photo_file_id,
+                caption=caption,
+                reply_markup=confirm_kb(user_id)
+            )
+            sent_to_any_admin = True
+        except TelegramBadRequest as e:
+            last_error = e
+            logger.exception("Не удалось передать чек админу: admin_id=%s user_id=%s", admin_id, user_id)
+        except Exception as e:
+            last_error = e
+            logger.exception("Ошибка отправки чека админу: admin_id=%s user_id=%s error=%s", admin_id, user_id, e)
+
+    if not sent_to_any_admin:
+        raise last_error or RuntimeError("Не удалось отправить чек ни одному админу")
+
 
 async def send_temporary_key(chat_id: int, user_id: int):
     try:
@@ -760,6 +839,7 @@ async def safe_delete_message(chat_id: int, message_id: int):
         )
 
 
+
 def format_subscription_text(expire: datetime) -> str:
     seconds_left = max(0, (expire - now()).total_seconds())
     days_left = math.ceil(seconds_left / 86400) if seconds_left > 0 else 0
@@ -773,6 +853,7 @@ def format_subscription_text(expire: datetime) -> str:
 
 # ================= START =================
 
+
 @dp.message(CommandStart())
 async def start(message: Message):
     await ensure_user_exists(message.from_user.id)
@@ -783,6 +864,7 @@ async def start(message: Message):
     )
 
 # ================= BUY =================
+
 
 @dp.callback_query(F.data == "buy")
 async def buy(callback: CallbackQuery):
@@ -821,11 +903,12 @@ async def paid(callback: CallbackQuery):
 
 # ================= RECEIPT =================
 
+
 @dp.message(F.photo)
 async def receipt(message: Message):
     user_id = message.from_user.id
 
-    if user_id == ADMIN_ID:
+    if is_admin(user_id):
         return
 
     if not await is_waiting(user_id):
@@ -860,28 +943,34 @@ async def receipt(message: Message):
         admin_caption += f"\n📝 Комментарий:\n<blockquote>{user_caption}</blockquote>"
 
     try:
-        await bot.send_photo(
-            ADMIN_ID,
-            photo=message.photo[-1].file_id,
+        await notify_admins_about_receipt(
+            photo_file_id=message.photo[-1].file_id,
             caption=admin_caption,
-            reply_markup=confirm_kb(user_id)
+            user_id=user_id,
         )
 
         await message.answer(CHECK_ACCEPTED_TEXT)
-        logger.info("Чек отправлен админу: user_id=%s username=%s", user_id, username)
+        logger.info("Чек отправлен администраторам: user_id=%s username=%s", user_id, username)
 
     except TelegramBadRequest:
-        logger.exception("Не удалось передать чек админу: user_id=%s", user_id)
+        logger.exception("Не удалось передать чек администраторам: user_id=%s", user_id)
         await message.answer(
-            "❌ <b>Не удалось передать чек администратору</b>\n"
-            "Проверьте <code>ADMIN_ID</code> и убедитесь, что администратор написал боту <code>/start</code>."
+            "❌ <b>Не удалось передать чек администраторам</b>\n"
+            "Проверьте <code>ADMIN_ID</code>/<code>ADMIN_IDS</code> и убедитесь, что администраторы написали боту <code>/start</code>."
+        )
+    except Exception as e:
+        logger.exception("Ошибка отправки чека администраторам: user_id=%s error=%s", user_id, e)
+        await message.answer(
+            "❌ <b>Не удалось передать чек администраторам</b>\n"
+            "Попробуйте отправить чек ещё раз или свяжитесь с поддержкой."
         )
 
 # ================= ADMIN PANEL =================
 
+
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -893,11 +982,12 @@ async def admin_panel(callback: CallbackQuery):
 
 # ================= CONFIRM / REJECT =================
 
+
 @dp.callback_query(F.data.regexp(r"^confirm_\d+$"))
 async def confirm(callback: CallbackQuery):
     await callback.answer()
 
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -936,7 +1026,7 @@ async def confirm(callback: CallbackQuery):
 async def reject(callback: CallbackQuery):
     await callback.answer()
 
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -978,6 +1068,7 @@ async def reject(callback: CallbackQuery):
             logger.warning("Не удалось убрать клавиатуру после reject: %s", e)
 
 # ================= KEY =================
+
 
 @dp.callback_query(F.data == "key")
 async def key(callback: CallbackQuery):
@@ -1025,6 +1116,7 @@ async def key(callback: CallbackQuery):
 
 # ================= SUB =================
 
+
 @dp.callback_query(F.data == "sub")
 async def sub(callback: CallbackQuery):
     sub_value = await get_subscription(callback.from_user.id)
@@ -1047,9 +1139,10 @@ async def sub(callback: CallbackQuery):
 
 # ================= STATS =================
 
+
 @dp.callback_query(F.data == "stats")
 async def stats(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1063,7 +1156,7 @@ async def stats(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "waiting_list")
 async def waiting_list(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1086,7 +1179,7 @@ async def waiting_list(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("open_waiting_"))
 async def open_waiting(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1121,7 +1214,7 @@ async def open_waiting(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "paid_list")
 async def paid_list(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1144,7 +1237,7 @@ async def paid_list(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("open_paid_"))
 async def open_paid(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1230,9 +1323,10 @@ async def open_paid(callback: CallbackQuery):
 
 # ================= REPEAT KEY BLOCK ADMIN =================
 
+
 @dp.callback_query(F.data == "repeat_key_blocked_list")
 async def repeat_key_blocked_list(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1255,7 +1349,7 @@ async def repeat_key_blocked_list(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("open_repeat_blocked_"))
 async def open_repeat_blocked(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1301,7 +1395,7 @@ async def open_repeat_blocked(callback: CallbackQuery):
 async def block_repeat_key(callback: CallbackQuery):
     await callback.answer()
 
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1348,7 +1442,7 @@ async def block_repeat_key(callback: CallbackQuery):
 async def unblock_repeat_key(callback: CallbackQuery):
     await callback.answer()
 
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1393,11 +1487,12 @@ async def unblock_repeat_key(callback: CallbackQuery):
 
 # ================= CLEAR WAITING =================
 
+
 @dp.callback_query(F.data == "clear_waiting_all")
 async def clear_waiting_confirm(callback: CallbackQuery):
     await callback.answer()
 
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1412,7 +1507,7 @@ async def clear_waiting_confirm(callback: CallbackQuery):
 async def clear_waiting_yes(callback: CallbackQuery):
     await callback.answer()
 
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1442,7 +1537,7 @@ async def clear_waiting_yes(callback: CallbackQuery):
 async def clear_waiting_no(callback: CallbackQuery):
     await callback.answer()
 
-    if callback.from_user.id != ADMIN_ID:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
@@ -1458,6 +1553,7 @@ async def clear_waiting_no(callback: CallbackQuery):
 
 # ================= HOME =================
 
+
 @dp.callback_query(F.data == "home")
 async def home(callback: CallbackQuery):
     await callback.message.edit_text(
@@ -1468,9 +1564,10 @@ async def home(callback: CallbackQuery):
 
 # ================= RUN =================
 
+
 async def main():
     await init_db()
-    logger.info("Bot started")
+    logger.info("Bot started with admins: %s", sorted(ADMIN_IDS))
     await dp.start_polling(bot)
 
 
